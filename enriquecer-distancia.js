@@ -1,15 +1,12 @@
 /**
- * PaceMarket — Enriquecer Distâncias
- * Busca km no Ticket Sports para provas sem distância
+ * PaceMarket — Enriquecer Distâncias v2
+ * Busca km no Ticket Sports E SuaCorrida para provas sem distância
  * e atualiza o Firebase automaticamente.
  *
  * Rodar: node enriquecer-distancia.js
  */
 const { initializeApp } = require("firebase/app");
-const {
-  getFirestore, collection, getDocs,
-  doc, updateDoc
-} = require("firebase/firestore");
+const { getFirestore, collection, getDocs, doc, updateDoc } = require("firebase/firestore");
 
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyBwoiW0fZ1UL3h283x0sfmdroVi3_T14bE",
@@ -51,82 +48,102 @@ function extrairDistancia(texto = "") {
 }
 
 // ── BUSCAR NO TICKET SPORTS ──────────────────────────────
-async function buscarDistanciaNoSite(link) {
-  if (!link) return null;
+async function buscarTicketSports(link) {
+  if (!link || !link.includes("ticketsports")) return null;
   try {
     const res = await fetch(link, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "pt-BR,pt;q=0.9",
-      },
+      headers: { "User-Agent": "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36", "Accept-Language": "pt-BR" },
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) return null;
     const html = await res.text();
 
-    // Tenta em ordem de confiabilidade:
-
-    // 1. Título da página
-    const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    if (titleMatch) {
-      const dist = extrairDistancia(titleMatch[1]);
-      if (dist) return { ...dist, fonte: "título" };
+    // Tenta título, h1, h2, meta description
+    for (const re of [
+      /<title[^>]*>([^<]+)<\/title>/i,
+      /<h1[^>]*>([^<]+)<\/h1>/i,
+      /<h2[^>]*>([^<]+)<\/h2>/i,
+      /<meta[^>]*name="description"[^>]*content="([^"]+)"/i,
+    ]) {
+      const m = html.match(re);
+      if (m) { const d = extrairDistancia(m[1]); if (d) return { ...d, fonte: "Ticket Sports" }; }
     }
 
-    // 2. H1 da página
-    const h1Match = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-    if (h1Match) {
-      const dist = extrairDistancia(h1Match[1]);
-      if (dist) return { ...dist, fonte: "h1" };
+    // Busca no corpo
+    const trechos = html.match(/(?:percurso|distância|categoria|modalidade)[^<]{0,150}/gi) || [];
+    for (const t of trechos) {
+      const d = extrairDistancia(t);
+      if (d) return { ...d, fonte: "Ticket Sports (corpo)" };
+    }
+  } catch(e) {}
+  return null;
+}
+
+// ── BUSCAR NO SUACORRIDA ─────────────────────────────────
+async function buscarSuaCorrida(nome) {
+  if (!nome) return null;
+  try {
+    // Busca o evento pelo nome no suacorrida
+    const nomeBusca = encodeURIComponent(nome.toLowerCase().replace(/\s+/g, "+").substring(0, 40));
+    const res = await fetch(`https://www.suacorrida.com.br/eventos/lista/?tribe_search=${nomeBusca}`, {
+      headers: { "User-Agent": "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36", "Accept-Language": "pt-BR" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    // Busca no conteúdo da página
+    const blocos = html.split(nome.substring(0, 15));
+    for (const bloco of blocos.slice(1, 3)) {
+      const d = extrairDistancia(bloco.substring(0, 500));
+      if (d) return { ...d, fonte: "SuaCorrida" };
     }
 
-    // 3. H2 da página
-    const h2Match = html.match(/<h2[^>]*>([^<]+)<\/h2>/i);
-    if (h2Match) {
-      const dist = extrairDistancia(h2Match[1]);
-      if (dist) return { ...dist, fonte: "h2" };
+    // Tenta extrair do HTML geral
+    const trechos = html.match(/(?:percurso|distância|categoria)[^<]{0,200}/gi) || [];
+    for (const t of trechos) {
+      const d = extrairDistancia(t);
+      if (d) return { ...d, fonte: "SuaCorrida (busca)" };
     }
+  } catch(e) {}
+  return null;
+}
 
-    // 4. Meta description
-    const metaMatch = html.match(/<meta[^>]*name="description"[^>]*content="([^"]+)"/i) ||
-                      html.match(/<meta[^>]*content="([^"]+)"[^>]*name="description"/i);
-    if (metaMatch) {
-      const dist = extrairDistancia(metaMatch[1]);
-      if (dist) return { ...dist, fonte: "meta" };
+// ── BUSCAR NO WEBRUN ─────────────────────────────────────
+async function buscarWebrun(nome) {
+  if (!nome) return null;
+  try {
+    const nomeBusca = encodeURIComponent(nome.substring(0, 30));
+    const res = await fetch(`https://webrun.com.br/?s=${nomeBusca}`, {
+      headers: { "User-Agent": "Mozilla/5.0 Chrome/120.0.0.0 Safari/537.36" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const trechos = html.match(/(?:\d+\s*k(?:m|\b))[^<]{0,50}/gi) || [];
+    for (const t of trechos) {
+      const d = extrairDistancia(t);
+      if (d) return { ...d, fonte: "Webrun" };
     }
-
-    // 5. Busca geral no HTML por padrões de distância em contexto de corrida
-    const trechosMatch = html.match(/(?:percurso|distância|categoria)[^<]{0,100}(\d+)\s*k(?:m|\b)/gi);
-    if (trechosMatch) {
-      for (const trecho of trechosMatch) {
-        const dist = extrairDistancia(trecho);
-        if (dist) return { ...dist, fonte: "conteúdo" };
-      }
-    }
-
-    return null;
-  } catch(e) {
-    return null; // timeout ou erro de rede
-  }
+  } catch(e) {}
+  return null;
 }
 
 // ── MAIN ─────────────────────────────────────────────────
 async function main() {
   console.log("═".repeat(58));
-  console.log("  🔍 PaceMarket — Enriquecer Distâncias");
-  console.log("  📡 Buscando km no Ticket Sports");
+  console.log("  🔍 PaceMarket — Enriquecer Distâncias v2");
+  console.log("  📡 Fontes: Nome · Ticket Sports · SuaCorrida · Webrun");
   console.log("═".repeat(58));
   console.log(`  ${new Date().toLocaleString("pt-BR")}\n`);
 
-  // Busca provas sem distância
   const snap = await getDocs(collection(db, "provas"));
   const semDist = snap.docs
     .map(d => ({ _id: d.id, ...d.data() }))
-    .filter(p => !p.distanciaKm && p.link);
+    .filter(p => !p.distanciaKm);
 
   console.log(`  📦 Total no banco: ${snap.docs.length} provas`);
-  console.log(`  ⚠️  Sem distância: ${semDist.length} provas\n`);
+  console.log(`  ⚠️  Sem distância:  ${semDist.length} provas\n`);
 
   if (semDist.length === 0) {
     console.log("  ✅ Todas as provas já têm distância!\n");
@@ -136,48 +153,56 @@ async function main() {
   let atualizadas = 0, naoEncontradas = 0;
 
   for (const prova of semDist) {
-    process.stdout.write(`  🔍 ${prova.nome?.substring(0, 45).padEnd(45)} `);
+    const label = prova.nome?.substring(0, 42).padEnd(42) || "?";
+    process.stdout.write(`  🔍 ${label} `);
 
-    // Primeiro tenta extrair do próprio nome
-    const distNome = extrairDistancia(prova.nome || "");
-    if (distNome) {
-      await updateDoc(doc(db, "provas", prova._id), {
-        distanciaKm: distNome.km,
-        distancia:   distNome.label,
-      });
-      console.log(`→ ${distNome.label} ✅ (nome)`);
-      atualizadas++;
-      continue;
+    let dist = null;
+
+    // 1. Tenta extrair do próprio nome
+    dist = extrairDistancia(prova.nome || "");
+    if (dist) { process.stdout.write(`→ ${dist.label} ✅ (nome)\n`); }
+
+    // 2. Ticket Sports
+    if (!dist) {
+      dist = await buscarTicketSports(prova.link);
+      if (dist) { process.stdout.write(`→ ${dist.label} ✅ (Ticket Sports)\n`); }
     }
 
-    // Busca no site do Ticket Sports
-    const distSite = await buscarDistanciaNoSite(prova.link);
-    if (distSite) {
+    // 3. SuaCorrida
+    if (!dist) {
+      dist = await buscarSuaCorrida(prova.nome);
+      if (dist) { process.stdout.write(`→ ${dist.label} ✅ (SuaCorrida)\n`); }
+    }
+
+    // 4. Webrun
+    if (!dist) {
+      dist = await buscarWebrun(prova.nome);
+      if (dist) { process.stdout.write(`→ ${dist.label} ✅ (Webrun)\n`); }
+    }
+
+    if (dist) {
       await updateDoc(doc(db, "provas", prova._id), {
-        distanciaKm: distSite.km,
-        distancia:   distSite.label,
+        distanciaKm: dist.km,
+        distancia:   dist.label,
       });
-      console.log(`→ ${distSite.label} ✅ (${distSite.fonte})`);
       atualizadas++;
     } else {
-      console.log(`→ não encontrado ❌`);
+      process.stdout.write(`→ não encontrado ❌\n`);
       naoEncontradas++;
     }
 
-    // Pausa para não sobrecarregar o servidor
-    await new Promise(r => setTimeout(r, 500));
+    // Pausa para não sobrecarregar
+    await new Promise(r => setTimeout(r, 400));
   }
 
   console.log("\n" + "═".repeat(58));
   console.log("  ✅ Concluído!");
-  console.log(`     ✅ Atualizadas:      ${atualizadas} provas`);
-  console.log(`     ❌ Não encontradas:  ${naoEncontradas} provas`);
-
+  console.log(`     ✅ Atualizadas:     ${atualizadas} provas`);
+  console.log(`     ❌ Não encontradas: ${naoEncontradas} provas`);
   if (naoEncontradas > 0) {
-    console.log("\n  💡 Dica: provas sem km após esse script");
-    console.log("     podem ser removidas com: node limpar-sem-km.js");
+    console.log("\n  💡 Provas restantes sem km podem ser removidas com:");
+    console.log("     node limpar-firebase.js");
   }
-
   console.log("\n  O app já exibe as distâncias em tempo real! 🚀\n");
   process.exit(0);
 }

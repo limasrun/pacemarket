@@ -238,7 +238,13 @@ function useProvas(){
     (async()=>{
       try{
         const snap=await getDocs(collection(db,"provas"));
-        if(!snap.empty) setTodas(snap.docs.map(d=>({id:d.id,...d.data()})));
+        if(!snap.empty){
+          const hoje=new Date().toISOString().split("T")[0]; // "2026-04-05"
+          const futuras=snap.docs
+            .map(d=>({id:d.id,...d.data()}))
+            .filter(p=>p.data?.iso && p.data.iso>=hoje); // só provas futuras com data
+          setTodas(futuras);
+        }
       }catch(e){console.warn("Firebase:",e.message);}
       finally{setLoading(false);}
     })();
